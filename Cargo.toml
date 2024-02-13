@@ -8,3 +8,6 @@ edition = "2021"
 [dependencies]
 similar = "2.2.1"
 soloud = "1.0.3"
+crt-term-gl = { path = "crt-term-gl" }
+glfw = "0.52.0"
+glow = "0.12.3"

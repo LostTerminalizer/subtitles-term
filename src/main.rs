@@ -1,89 +1,81 @@
 #![feature(iter_intersperse)]
 
 use std::{
-    fs::{read_to_string, File},
-    io::{self, Write},
-    thread,
-    time::{Duration, Instant},
+    collections::VecDeque,
+    fmt::Write as _,
+    fs::read_to_string,
+    sync::Arc,
+    time::Instant,
 };
 
+use crt_term_gl::ScreenInfo;
+use glfw::Context;
+use glow::HasContext;
 use similar::DiffTag;
 use soloud::{AudioExt, LoadExt, Soloud};
 
-const TRANSCRIPT: &str = "/home/ved-s/lt/transcripts/1.2.words.tsv";
-const SCRIPT: &str = "/home/ved-s/lt/scripts/1.2.txt";
-const AUDIO: &str = "/home/ved-s/lt/audio/1.2.mp3";
+const TRANSCRIPT: &str = "/home/ved-s/lt/transcripts/1.1.words.tsv";
+const SCRIPT: &str = "/home/ved-s/lt/scripts/1.1.txt";
+const AUDIO: &str = "/home/ved-s/lt/audio/1.1.mp3";
 
-fn main() {
-    let str = read_to_string(TRANSCRIPT).unwrap();
-    let transcript_words: Vec<_> = str
-        .lines()
-        .skip(1)
-        .map(|line| {
-            let mut split = line.splitn(3, '\t');
-            let start: u64 = split.next().unwrap().parse().unwrap();
-            let end: u64 = split.next().unwrap().parse().unwrap();
-            let phrase = split.next().unwrap();
+pub struct Word {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub word: String,
+}
 
-            (start, end, phrase)
+pub fn match_timestamps_to_script(words: Vec<Word>, script: &str) -> Vec<Word> {
+    let script_words: Vec<_> = split(script);
+
+    let transformed_words: Vec<String> = words
+        .iter()
+        .map(|w| {
+            w.word
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(|c| c.to_lowercase())
+                .collect()
         })
         .collect();
-    let script_str = read_to_string(SCRIPT).unwrap();
-    let script: Vec<_> = split(&script_str);
+    let transformed_script_words: Vec<String> = script_words
+        .iter()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(|c| c.to_lowercase())
+                .collect()
+        })
+        .collect();
 
-    // let transcript_words_str: Vec<_> = transcript_words.iter().map(|s| s.2).collect();
-    // let diff = similar::TextDiff::from_slices(&transcript_words_str, &script);
-    // let diff = diff.ops();
+    let transformed_words: Vec<_> = transformed_words.iter().map(|s| s.as_str()).collect();
+    let transformed_script_words: Vec<_> = transformed_script_words
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
 
-    let diff: Vec<_> = {
-        let fixed_transcript_words: Vec<String> = transcript_words
-            .iter()
-            .map(|w| {
-                w.2.chars()
-                    .filter(|c| c.is_alphanumeric())
-                    .flat_map(|c| c.to_lowercase())
-                    .collect()
-            })
-            .collect();
-        let fixed_script_words: Vec<String> = script
-            .iter()
-            .map(|w| {
-                w.chars()
-                    .filter(|c| c.is_alphanumeric())
-                    .flat_map(|c| c.to_lowercase())
-                    .collect()
-            })
-            .collect();
+    let diff = similar::TextDiff::from_slices(&transformed_words, &transformed_script_words);
 
-        let fixed_transcript_words: Vec<_> =
-            fixed_transcript_words.iter().map(|s| s.as_str()).collect();
-        let fixed_script_words: Vec<_> = fixed_script_words.iter().map(|s| s.as_str()).collect();
-
-        let diff = similar::TextDiff::from_slices(&fixed_transcript_words, &fixed_script_words);
-        diff.ops().to_vec()
-    };
-
-    let ms_per_byte_whole = transcript_words
+    let ms_per_byte_whole = words
         .iter()
         .map(|t| {
-            let dur = t.1 - t.0;
-            dur as f32 / t.2.len() as f32
+            let dur = t.end_ms - t.start_ms;
+            dur as f32 / t.word.len() as f32
         })
         .sum::<f32>()
-        / transcript_words.len() as f32;
+        / words.len() as f32;
 
     let average_wait = {
         let mut sum = 0u64;
         let mut count = 0usize;
 
-        for (i, t) in transcript_words.iter().enumerate() {
+        for (i, t) in words.iter().enumerate() {
             if i == 0 {
-               continue;
+                continue;
             }
 
-            let wait = t.0 - transcript_words[i-1].1;
+            let wait = t.start_ms - words[i - 1].end_ms;
             if i > 1 {
-                let prev_wait = transcript_words[i-1].0- transcript_words[i-2].1;
+                let prev_wait = words[i - 1].start_ms - words[i - 2].end_ms;
                 if wait > prev_wait * 20 {
                     continue;
                 }
@@ -91,7 +83,7 @@ fn main() {
 
             sum += wait;
             count += 1;
-        } 
+        }
 
         if count == 0 {
             0
@@ -100,30 +92,34 @@ fn main() {
         }
     };
 
-    let mut fixed_script: Vec<(u64, u64, &str)> = vec![];
-    for op in diff {
+    let mut matched_words: Vec<Word> = vec![];
+    for op in diff.ops() {
         match op.tag() {
             DiffTag::Equal => {
                 for i in 0..op.new_range().len() {
                     let old = op.old_range().start + i;
                     let new = op.new_range().start + i;
 
-                    let old = transcript_words[old];
-                    let new = (old.0, old.1, script[new]);
+                    let old = &words[old];
+                    let new = Word {
+                        start_ms: old.start_ms,
+                        end_ms: old.end_ms,
+                        word: script_words[new].to_owned(),
+                    };
 
-                    fixed_script.push(new);
+                    matched_words.push(new);
                 }
             }
             DiffTag::Delete => {}
             DiffTag::Insert => 'b: {
-                let last_time = fixed_script
+                let last_time = matched_words
                     .iter()
-                    .filter_map(|s| if s.1 == 0 { None } else { Some(s.1) })
-                    .last();
+                    .rev()
+                    .filter_map(|s| if s.end_ms == 0 { None } else { Some(s.end_ms) })
+                    .next();
 
                 if let Some(last_time) = last_time {
-
-                    let script = &script[op.new_range()];
+                    let script = &script_words[op.new_range()];
 
                     let mut pos = last_time;
                     for (i, word) in script.iter().enumerate() {
@@ -132,14 +128,22 @@ fn main() {
                         }
                         let length = (word.len() as f32 * ms_per_byte_whole) as u64;
                         let end = pos + length;
-                        fixed_script.push((pos, end, word));
+                        matched_words.push(Word {
+                            start_ms: pos,
+                            end_ms: end,
+                            word: (*word).to_owned(),
+                        });
                         pos += length;
                     }
                     break 'b;
                 }
 
                 for i in op.new_range() {
-                    fixed_script.push((0, 0, script[i]));
+                    matched_words.push(Word {
+                        start_ms: 0,
+                        end_ms: 0,
+                        word: script_words[i].to_owned(),
+                    });
                 }
             }
             DiffTag::Replace => 'b: {
@@ -149,29 +153,33 @@ fn main() {
                         let old = op.old_range().start + i;
                         let new = op.new_range().start + i;
 
-                        let old = transcript_words[old];
-                        let new = (old.0, old.1, script[new]);
-                        fixed_script.push(new);
+                        let old = &words[old];
+                        let new = Word {
+                            start_ms: old.start_ms,
+                            end_ms: old.end_ms,
+                            word: script_words[new].to_owned(),
+                        };
+                        matched_words.push(new);
                     }
                     break 'b;
                 }
                 // --[#]-[###]---[#]-- -> --[#####]---[##]--
                 else {
-                    let transcript_words = &transcript_words[op.old_range()];
-                    let start = transcript_words[0].0;
-                    let end = transcript_words[transcript_words.len() - 1].1;
+                    let words = &words[op.old_range()];
+                    let start = words[0].start_ms;
+                    let end = words[words.len() - 1].end_ms;
                     let dur = end - start;
 
-                    let script = &script[op.new_range()];
+                    let script = &script_words[op.new_range()];
 
-                    let ms_per_byte = transcript_words
+                    let ms_per_byte = words
                         .iter()
                         .map(|t| {
-                            let dur = t.1 - t.0;
-                            dur as f32 / t.2.len() as f32
+                            let dur = t.end_ms - t.start_ms;
+                            dur as f32 / t.word.len() as f32
                         })
                         .sum::<f32>()
-                        / transcript_words.len() as f32;
+                        / words.len() as f32;
 
                     let lengths: Vec<_> = script
                         .iter()
@@ -194,7 +202,11 @@ fn main() {
                             }
                             let length = lengths[i];
                             let end = pos + length;
-                            fixed_script.push((pos, end, word));
+                            matched_words.push(Word {
+                                start_ms: pos,
+                                end_ms: end,
+                                word: (*word).to_owned(),
+                            });
                             pos += length;
                         }
 
@@ -202,104 +214,49 @@ fn main() {
                     }
                 }
                 // --[#]-[###]--[##] -> --[########]----
-                let transcript_words = &transcript_words[op.old_range()];
-                let start = transcript_words[0].0;
-                let end = transcript_words[transcript_words.len() - 1].1;
+                let words = &words[op.old_range()];
+                let start = words[0].start_ms;
+                let end = words[words.len() - 1].end_ms;
 
-                let script = &script[op.new_range()];
-                let script_start = script[0];
-                let script_end = script[script.len() - 1];
+                let script_words = &script_words[op.new_range()];
+                let script_start = script_words[0];
+                let script_end = script_words[script_words.len() - 1];
 
-                let script_start = substr_pos(script_str.as_str(), script_start).unwrap();
-                let script_end =
-                    substr_pos(script_str.as_str(), script_end).unwrap() + script_end.len();
+                let script_start = substr_pos(script, script_start).unwrap();
+                let script_end = substr_pos(script, script_end).unwrap() + script_end.len();
 
-                let script_substr = &script_str[script_start..script_end];
+                let script_substr = &script[script_start..script_end];
 
-                let phrase = (start, end, script_substr);
-                fixed_script.push(phrase);
+                matched_words.push(Word {
+                    start_ms: start,
+                    end_ms: end,
+                    word: script_substr.to_owned(),
+                });
             }
         }
     }
 
-    {
-        let mut file = File::create("test/output.txt").unwrap();
-        let mut tmp = String::new();
-        for (i, p) in fixed_script.iter().enumerate() {
-            if i > 0 {
-                file.write_all(b"\n").unwrap();
-            }
-            tmp.clear();
-            for c in p.2.chars() {
-                if c == '\n' {
-                    tmp.push_str("\\n");
-                } else {
-                    tmp.push(c);
-                }
-            }
-            file.write_fmt(format_args!("{} {} \"{}\"", p.0, p.1, tmp)).unwrap();
-        }
-    }
+    matched_words
 
-    let sl = Soloud::default().unwrap();
-    let mut wav = soloud::Wav::default();
-    wav.load(AUDIO).unwrap();
-
-    sl.play(&wav);
-    while sl.voice_count() == 0 {
-        thread::sleep(Duration::from_millis(1));
-    }
-    let start = Instant::now();
-    for phrase in fixed_script {
-        print_phrase(start, phrase.0, phrase.1, phrase.2);
-    }
-    println!();
-    
-    if sl.voice_count() > 0 {
-        println!();
-        println!("[system] Waiting for audio");
-        while sl.voice_count() > 0 {
-            thread::sleep(Duration::from_millis(100));
-        }
-    }
+    // {
+    //     let mut file = File::create("test/output.txt").unwrap();
+    //     let mut tmp = String::new();
+    //     for (i, p) in fixed_script.iter().enumerate() {
+    //         if i > 0 {
+    //             file.write_all(b"\n").unwrap();
+    //         }
+    //         tmp.clear();
+    //         for c in p.2.chars() {
+    //             if c == '\n' {
+    //                 tmp.push_str("\\n");
+    //             } else {
+    //                 tmp.push(c);
+    //             }
+    //         }
+    //         file.write_fmt(format_args!("{} {} \"{}\"", p.0, p.1, tmp)).unwrap();
+    //     }
+    // }
 }
-
-// fn fit_words_with_set_speed<'a>(
-//     script: &'a [&'a str],
-//     ms_per_byte: f32,
-//     dur: u64,
-//     start: u64,
-//     fixed_script: &'a mut Vec<(u64, u64, &'a str)>,
-// ) -> bool {
-//     let lengths: Vec<_> = script
-//         .iter()
-//         .map(|word| (word.len() as f32 * ms_per_byte) as u64)
-//         .collect();
-//     let total_length: u64 = lengths.iter().sum();
-
-//     // all words fit
-//     if total_length < dur {
-//         let pause_count = script.len() - 1;
-//         let pause_len = if pause_count == 0 {
-//             0
-//         } else {
-//             (dur - total_length) / pause_count as u64
-//         };
-//         let mut pos = start;
-//         for (i, word) in script.iter().enumerate() {
-//             if i > 0 {
-//                 pos += pause_len
-//             }
-//             let length = lengths[i];
-//             let end = pos + length;
-//             fixed_script.push((pos, end, word));
-//             pos += length;
-//         }
-
-//         return true;
-//     }
-//     false
-// }
 
 fn split(str: &str) -> Vec<&str> {
     let mut vec = vec![];
@@ -344,44 +301,142 @@ fn substr_pos(main: &str, sub: &str) -> Option<usize> {
     }
 }
 
-fn print_phrase(start_time: Instant, start_ms: u64, end_ms: u64, text: &str) {
-    let phrase_start_time = start_time + Duration::from_millis(start_ms);
-    let phrase_end_time = start_time + Duration::from_millis(end_ms);
+fn main() {
+    let str = read_to_string(TRANSCRIPT).unwrap();
+    let words: Vec<_> = str
+        .lines()
+        .skip(1)
+        .map(|line| {
+            let mut split = line.splitn(3, '\t');
+            let start: u64 = split.next().unwrap().parse().unwrap();
+            let end: u64 = split.next().unwrap().parse().unwrap();
+            let phrase = split.next().unwrap();
 
-    let n = Instant::now();
-    let wait = phrase_start_time.checked_duration_since(n);
-    if let Some(wait) = wait {
-        thread::sleep(wait);
-    }
+            Word {
+                start_ms: start,
+                end_ms: end,
+                word: phrase.to_owned(),
+            }
+        })
+        .collect();
+    let script = read_to_string(SCRIPT).unwrap();
+    let words = match_timestamps_to_script(words, &script);
 
-    if phrase_end_time < Instant::now() {
-        if text.ends_with('\n') {
-            print!("{text}");
-        } else {
-            print!("{text} ");
+    let mut glfw = glfw::init::<()>(None).unwrap();
+    glfw.set_swap_interval(glfw::SwapInterval::Sync(1));
+    let (mut win, events) = glfw
+        .create_window(1280, 720, "subtitles term", glfw::WindowMode::Windowed)
+        .unwrap();
+
+    let gl =
+        Arc::new(unsafe { glow::Context::from_loader_function(|proc| win.get_proc_address(proc)) });
+
+    let draw_size = win.get_framebuffer_size();
+
+    let default_screen_info = ScreenInfo {
+        gl_pos: [-1.0, -1.0],
+        gl_size: [2.0, 2.0],
+
+        chars_size: [80, 20],
+        frame_size: [0; 2],
+    };
+
+    let mut crt = crt_term_gl::CRTTerm::new(
+        gl.clone(),
+        ScreenInfo {
+            frame_size: [draw_size.0 as u32, draw_size.1 as u32],
+            ..default_screen_info
+        },
+    );
+
+    unsafe { gl.clear_color(1.0, 1.0, 1.0, 1.0) };
+    win.make_current();
+    win.set_framebuffer_size_polling(true);
+
+    let mut remaining = VecDeque::from(words);
+    let mut current_word = None;
+    let mut current_word_char = 0;
+    let mut current_word_next_char_ts = 0;
+    let mut current_word_ms_per_char = 0;
+
+    let sl = Soloud::default().unwrap();
+    let mut wav = soloud::Wav::default();
+    wav.load(AUDIO).unwrap();
+
+    sl.play(&wav);
+
+    let mut start_time = Instant::now();
+    let mut started = false;
+    let mut printing_space = false;
+
+    let offset_ms = 350;
+
+    while !win.should_close() {
+        glfw.poll_events();
+
+        for (_, event) in glfw::flush_messages(&events) {
+            if let glfw::WindowEvent::FramebufferSize(width, height) = event {
+                unsafe { gl.viewport(0, 0, width, height) };
+                crt.screen_changed(ScreenInfo {
+                    frame_size: [width as u32, height as u32],
+                    ..default_screen_info
+                });
+            }
         }
-        io::stdout().flush().unwrap();
-    } else {
-        for (i, (text_pos, char)) in text.char_indices().enumerate() {
-            let remaining = text.len() - i;
-            let remaining_time = phrase_end_time.checked_duration_since(Instant::now());
-            let remaining_time = match remaining_time {
-                None => {
-                    print!("{}", &text[text_pos..]);
-                    io::stdout().flush().unwrap();
-                    break;
+
+        unsafe { gl.clear(glow::COLOR_BUFFER_BIT) };
+
+        if sl.voice_count() != 0 {
+            if !started {
+                start_time = Instant::now();
+            }
+            started = true;
+
+            if printing_space {
+                if crt.cursor[0] > 0 {
+                    let _ = crt.write_char(' ');
                 }
-                Some(t) => t,
-            };
+                printing_space = false;
+            } else {
+                let current_ts = (Instant::now() - start_time).as_millis() as u64 + offset_ms;
 
-            let wait = remaining_time / remaining as u32;
-            thread::sleep(wait);
-            print!("{}", char);
-            io::stdout().flush().unwrap();
+                if current_word.is_none() {
+                    current_word = remaining.pop_front();
+                    current_word_char = 0;
+
+                    if let Some(word) = &current_word {
+                        current_word_next_char_ts = word.start_ms;
+                        if word.end_ms >= word.start_ms {
+                            current_word_ms_per_char = 0;
+                        } else {
+                            current_word_ms_per_char =
+                                (word.end_ms - word.start_ms) / word.word.len() as u64;
+                        }
+                    }
+                }
+
+                let mut phrase_ended = false;
+                if let Some(word) = &current_word {
+                    if current_ts >= current_word_next_char_ts {
+                        let char = word.word.chars().nth(current_word_char);
+                        if let Some(char) = char {
+                            current_word_char += 1;
+                            current_word_next_char_ts += current_word_ms_per_char;
+                            let _ = crt.write_char(char);
+                        } else {
+                            phrase_ended = true;
+                        }
+                    }
+                }
+                if phrase_ended {
+                    current_word = None;
+                    printing_space = true;
+                }
+            }
         }
-        if !text.ends_with('\n') {
-            print!(" ");
-        }
-        io::stdout().flush().unwrap();
+
+        crt.update();
+
+        win.swap_buffers();
     }
 }
