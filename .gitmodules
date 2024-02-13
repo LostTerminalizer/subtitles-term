@@ -1,3 +1,3 @@
 [submodule "crt-term-gl"]
 	path = crt-term-gl
-	url = git@github.com:LostTerminalizer/crt-term-gl.git
+	url = https://github.com/LostTerminalizer/crt-term-gl.git
