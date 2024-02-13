@@ -14,9 +14,9 @@ use glow::HasContext;
 use similar::DiffTag;
 use soloud::{AudioExt, LoadExt, Soloud};
 
-const TRANSCRIPT: &str = "/home/ved-s/lt/transcripts/1.1.words.tsv";
-const SCRIPT: &str = "/home/ved-s/lt/scripts/1.1.txt";
-const AUDIO: &str = "/home/ved-s/lt/audio/1.1.mp3";
+const TRANSCRIPT: &str = "lt/1.1.words.tsv";
+const SCRIPT: &str = "lt/1.1.txt";
+const AUDIO: &str = "lt/1.1.mp3";
 
 pub struct Word {
     pub start_ms: u64,
